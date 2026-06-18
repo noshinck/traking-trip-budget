@@ -1595,6 +1595,21 @@ export default function TripTracker() {
           <img src={lightboxPhoto} alt="Trek memory" className="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl" />
         </div>
       )}
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          FOOTER: Creator attribution
+      ════════════════════════════════════════════════════════════════════════ */}
+      <footer className="mt-20 py-8 text-center text-slate-400 text-sm border-t border-slate-100">
+        Crafted with ❤️ by{' '}
+        <a
+          href="https://www.instagram.com/noshin.ck/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="hover:text-indigo-600 transition-colors"
+        >
+          Noshin CK
+        </a>
+      </footer>
     </div>
   );
 }
