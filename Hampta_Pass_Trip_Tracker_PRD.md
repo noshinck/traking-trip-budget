@@ -14,7 +14,6 @@ A high-performance, real-time expense and status tracking dashboard designed for
 | **Burn Rate Tracker** | GSAP-animated "Traffic Light" header indicating spend velocity vs. 60k budget. |
 | **Treasurer Tools** | Elevated access for 5th user to log `FIXED_GROUP` expenses (package costs). |
 | **Status Beacon** | One-tap group communication (Ahead, Behind, Resting, Emergency) saved to cloud. |
-| **Treat Pot** | Persistent savings bucket for final-day group rewards. |
 | **WhatsApp Sync** | One-click text-format ledger export for group communication. |
 | **Sync Token** | Base64 state backup for manual data recovery if the device is lost/swapped. |
 
@@ -22,7 +21,7 @@ A high-performance, real-time expense and status tracking dashboard designed for
 * **Frontend:** React (Vite), Tailwind CSS (CDN), GSAP (CDN).
 * **Backend:** Supabase (PostgreSQL).
 * **Database Tables:** * `expenses`: Individual spend logs, categories, and split logic.
-    * `trip_state`: Global application state (Treat Pot, Status Beacon).
+    * `trip_state`: Global application state for the Status Beacon.
 * **Deployment:** Vercel (Production-ready).
 
 ## 5. Functional Requirements

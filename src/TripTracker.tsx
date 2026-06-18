@@ -41,15 +41,7 @@ const CATEGORIES = [
   { id: 'Fixed-Package', label: 'Fixed-Pkg', icon: '📦', dbName: 'Other' },
 ] as const;
 
-// ─── Emergency Info (hardcoded) ───────────────────────────────────────────────
-const EMERGENCY_INFO: Record<Trekker, { blood: string; contact: string; contactPhone: string }> = {
-  Noshin:  { blood: 'B+',  contact: 'Father - Rashid',  contactPhone: '+91 98765 00001' },
-  Nazih:   { blood: 'O+',  contact: 'Mother - Fareeda', contactPhone: '+91 98765 00002' },
-  Nihad:   { blood: 'A+',  contact: 'Brother - Fahad',  contactPhone: '+91 98765 00003' },
-  Jilshad: { blood: 'AB+', contact: 'Sister - Amira',   contactPhone: '+91 98765 00004' },
-};
-
-const BASE_CAMP = {
+const DEFAULT_BASE_CAMP = {
   name: 'Hampta Pass Base Camp',
   coords: '32.2432° N, 77.2578° E',
   altitude: '4,270 m (14,009 ft)',
@@ -69,21 +61,47 @@ interface Expense {
   timestamp: string;
 }
 
+interface SafetyMemberInfo {
+  blood: string;
+  contact: string;
+  contactPhone: string;
+}
+
+interface EmergencyData {
+  trekkers: Record<Trekker, SafetyMemberInfo>;
+  baseCamp: typeof DEFAULT_BASE_CAMP;
+}
+
 interface TripState {
   id: number;
-  treat_pot: number;
   group_status: 'Ahead' | 'Behind' | 'Resting' | 'Emergency';
+  emergency_data: EmergencyData;
 }
 
 interface QueueItem {
   id: string;
-  action: 'insert_expense' | 'delete_expense' | 'update_status' | 'update_pot';
+  action: 'insert_expense' | 'delete_expense' | 'update_status';
   payload: any;
 }
 
 const DEFAULT_BUDGET = 60000;
 const TREASURER_PASSCODE = '2026';
 const PHOTO_BUCKET = 'trip_photos';
+const DEFAULT_EMERGENCY_DATA: EmergencyData = {
+  trekkers: {
+    Noshin:  { blood: 'B+',  contact: 'Father - Rashid',  contactPhone: '+91 98765 00001' },
+    Nazih:   { blood: 'O+',  contact: 'Mother - Fareeda', contactPhone: '+91 98765 00002' },
+    Nihad:   { blood: 'A+',  contact: 'Brother - Fahad',  contactPhone: '+91 98765 00003' },
+    Jilshad: { blood: 'AB+', contact: 'Sister - Amira',   contactPhone: '+91 98765 00004' },
+  },
+  baseCamp: DEFAULT_BASE_CAMP,
+};
+
+interface TripPhoto {
+  name: string;
+  url: string;
+  isOptimistic?: boolean;
+}
 
 // ─── Helper: normalise split list ─────────────────────────────────────────────
 const normaliseSplit = (raw: string | string[]): string[] => {
@@ -92,13 +110,18 @@ const normaliseSplit = (raw: string | string[]): string[] => {
   return [];
 };
 
-// ─── Helper: get personal expenses for a trekker ──────────────────────────────
-const getPersonalExpenses = (name: string, expenses: Expense[]): Expense[] =>
-  expenses.filter((e) => {
-    if (e.type === 'Fixed-Package') return false;
-    const splits = normaliseSplit(e.split_between);
-    return e.payer === name || splits.includes(name);
-  });
+const normaliseEmergencyData = (raw: unknown): EmergencyData => {
+  const incoming = (raw && typeof raw === 'object' ? raw : {}) as Partial<EmergencyData>;
+  const incomingTrekkers = (incoming.trekkers && typeof incoming.trekkers === 'object' ? incoming.trekkers : {}) as Partial<Record<Trekker, Partial<SafetyMemberInfo>>>;
+
+  return {
+    baseCamp: { ...DEFAULT_EMERGENCY_DATA.baseCamp, ...(incoming.baseCamp ?? {}) },
+    trekkers: TREKKERS.reduce((acc, name) => ({
+      ...acc,
+      [name]: { ...DEFAULT_EMERGENCY_DATA.trekkers[name], ...(incomingTrekkers[name] ?? {}) },
+    }), {} as Record<Trekker, SafetyMemberInfo>),
+  };
+};
 
 // ─── Helper: category display meta ───────────────────────────────────────────
 const getCategoryMeta = (catName: string) => {
@@ -118,7 +141,7 @@ export default function TripTracker() {
 
   // — Core data
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [tripState, setTripState] = useState<TripState>({ id: 1, treat_pot: 0, group_status: 'Ahead' });
+  const [tripState, setTripState] = useState<TripState>({ id: 1, group_status: 'Ahead', emergency_data: DEFAULT_EMERGENCY_DATA });
 
   // — Role / Auth
   const [isTreasurerUnlocked, setIsTreasurerUnlocked] = useState(
@@ -154,10 +177,13 @@ export default function TripTracker() {
 
   // — Safety Panel
   const [showSafety, setShowSafety] = useState(false);
+  const [isEditingSafety, setIsEditingSafety] = useState(false);
+  const [safetyDraft, setSafetyDraft] = useState<EmergencyData>(DEFAULT_EMERGENCY_DATA);
+  const [savingSafety, setSavingSafety] = useState(false);
   const safetyPanelRef = useRef<HTMLDivElement>(null);
 
   // — Memory Vault
-  const [photos, setPhotos] = useState<string[]>([]);
+  const [photos, setPhotos] = useState<TripPhoto[]>([]);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [lightboxPhoto, setLightboxPhoto] = useState<string | null>(null);
   const lightboxRef = useRef<HTMLDivElement>(null);
@@ -193,6 +219,14 @@ export default function TripTracker() {
     });
     return { name, paid, share, balance: paid - share };
   });
+
+  const getPersonalExpenses = useCallback((trekkerName: string): Expense[] =>
+    expenses.filter((e) => {
+      if (e.type === 'Fixed-Package') return false;
+      const splits = normaliseSplit(e.split_between);
+      return e.payer === trekkerName || splits.includes(trekkerName);
+    }), [expenses]);
+  const safetyData = isEditingSafety ? safetyDraft : tripState.emergency_data;
 
   // ── Network listeners
   useEffect(() => {
@@ -233,14 +267,16 @@ export default function TripTracker() {
       setExpenses(merged);
 
       if (stateData && stateData.length > 0) {
-        let s = stateData[0];
+        let s: TripState = {
+          ...stateData[0],
+          emergency_data: normaliseEmergencyData(stateData[0].emergency_data),
+        };
         q.forEach((item) => {
           if (item.action === 'update_status') s = { ...s, group_status: item.payload.group_status };
-          if (item.action === 'update_pot')    s = { ...s, treat_pot: item.payload.treat_pot };
         });
         setTripState(s);
       } else {
-        const def = { id: 1, treat_pot: 0, group_status: 'Ahead' as const };
+        const def = { id: 1, group_status: 'Ahead' as const, emergency_data: DEFAULT_EMERGENCY_DATA };
         await supabase.from('trip_state').insert([def]);
         setTripState(def);
       }
@@ -259,13 +295,22 @@ export default function TripTracker() {
     const savedExp   = localStorage.getItem('offline_expenses_cache');
     const savedState = localStorage.getItem('offline_state_cache');
     if (savedExp)   { try { setExpenses(JSON.parse(savedExp)); }   catch (_) {} }
-    if (savedState) { try { setTripState(JSON.parse(savedState)); } catch (_) {} }
+    if (savedState) {
+      try {
+        const parsed = JSON.parse(savedState);
+        setTripState({ ...parsed, emergency_data: normaliseEmergencyData(parsed.emergency_data) });
+      } catch (_) {}
+    }
   };
 
   useEffect(() => {
     if (expenses.length > 0) localStorage.setItem('offline_expenses_cache', JSON.stringify(expenses));
     localStorage.setItem('offline_state_cache', JSON.stringify(tripState));
   }, [expenses, tripState]);
+
+  useEffect(() => {
+    if (!isEditingSafety) setSafetyDraft(tripState.emergency_data);
+  }, [isEditingSafety, tripState.emergency_data]);
 
   useEffect(() => {
     fetchData();
@@ -280,19 +325,48 @@ export default function TripTracker() {
     return () => { supabase.removeChannel(ch1); supabase.removeChannel(ch2); };
   }, [fetchData]);
 
+  const ensurePhotoBucket = useCallback(async () => {
+    try {
+      const { data, error } = await supabase.storage.getBucket(PHOTO_BUCKET);
+      if (data || !error) return;
+
+      const bucketMissing = /not found|does not exist/i.test(error.message);
+      if (!bucketMissing) {
+        console.warn('Photo bucket check failed:', error.message);
+        return;
+      }
+
+      const { error: createError } = await supabase.storage.createBucket(PHOTO_BUCKET, {
+        public: true,
+        fileSizeLimit: 10 * 1024 * 1024,
+        allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+      });
+
+      if (createError && !/already exists/i.test(createError.message)) {
+        console.warn('Photo bucket creation failed:', createError.message);
+      }
+    } catch (err) {
+      console.warn('Photo bucket setup skipped:', err);
+    }
+  }, []);
+
   // ── Fetch photos
   const fetchPhotos = useCallback(async () => {
     try {
+      await ensurePhotoBucket();
       const { data, error } = await supabase.storage.from(PHOTO_BUCKET).list('', { limit: 100, sortBy: { column: 'created_at', order: 'desc' } });
       if (error) throw error;
       const urls = (data ?? [])
         .filter((f) => f.name !== '.emptyFolderPlaceholder')
-        .map((f) => supabase.storage.from(PHOTO_BUCKET).getPublicUrl(f.name).data.publicUrl);
+        .map((f) => ({
+          name: f.name,
+          url: supabase.storage.from(PHOTO_BUCKET).getPublicUrl(f.name).data.publicUrl,
+        }));
       setPhotos(urls);
     } catch (err) {
       console.error('Photo fetch error:', err);
     }
-  }, []);
+  }, [ensurePhotoBucket]);
 
   useEffect(() => { fetchPhotos(); }, [fetchPhotos]);
 
@@ -343,6 +417,7 @@ export default function TripTracker() {
 
   // ── GSAP: Safety Panel fade-in
   const openSafetyPanel = () => {
+    setSafetyDraft(tripState.emergency_data);
     setShowSafety(true);
     requestAnimationFrame(() => {
       if (safetyPanelRef.current) {
@@ -358,9 +433,13 @@ export default function TripTracker() {
     if (safetyPanelRef.current) {
       gsap.to(safetyPanelRef.current, {
         opacity: 0, scale: 0.97, duration: 0.25, ease: 'power3.in',
-        onComplete: () => setShowSafety(false),
+        onComplete: () => {
+          setIsEditingSafety(false);
+          setShowSafety(false);
+        },
       });
     } else {
+      setIsEditingSafety(false);
       setShowSafety(false);
     }
   };
@@ -405,9 +484,6 @@ export default function TripTracker() {
         } else if (item.action === 'update_status') {
           const { error } = await supabase.from('trip_state').update({ group_status: item.payload.group_status }).eq('id', tripState.id);
           if (error) throw error;
-        } else if (item.action === 'update_pot') {
-          const { error } = await supabase.from('trip_state').update({ treat_pot: item.payload.treat_pot }).eq('id', tripState.id);
-          if (error) throw error;
         }
         remaining.shift();
       }
@@ -430,7 +506,6 @@ export default function TripTracker() {
     if (action === 'insert_expense') setExpenses((prev) => [payload, ...prev]);
     else if (action === 'delete_expense') setExpenses((prev) => prev.filter((e) => e.id !== payload.id));
     else if (action === 'update_status') setTripState((prev) => ({ ...prev, group_status: payload.group_status }));
-    else if (action === 'update_pot') setTripState((prev) => ({ ...prev, treat_pot: payload.treat_pot }));
   };
 
   // ── Auth
@@ -540,17 +615,73 @@ export default function TripTracker() {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadingPhoto(true);
+    const ext  = file.name.split('.').pop() || 'jpg';
+    const path = `photo_${Date.now()}.${ext}`;
+    const localUrl = URL.createObjectURL(file);
+    const optimisticPhoto: TripPhoto = { name: path, url: localUrl, isOptimistic: true };
+    setPhotos((prev) => [optimisticPhoto, ...prev]);
     try {
-      const ext  = file.name.split('.').pop();
-      const path = `photo_${Date.now()}.${ext}`;
+      await ensurePhotoBucket();
       const { error } = await supabase.storage.from(PHOTO_BUCKET).upload(path, file, { upsert: true });
       if (error) throw error;
       await fetchPhotos();
     } catch (err: any) {
+      setPhotos((prev) => prev.filter((photo) => photo.name !== path));
       alert('Upload failed: ' + err.message);
     } finally {
+      URL.revokeObjectURL(localUrl);
       setUploadingPhoto(false);
       e.target.value = '';
+    }
+  };
+
+  const handleDeletePhoto = async (photo: TripPhoto) => {
+    if (currentUser !== 'Treasurer') return;
+    if (!confirm('Delete this photo?')) return;
+
+    const previousPhotos = photos;
+    setPhotos((prev) => prev.filter((item) => item.name !== photo.name));
+    try {
+      const { error } = await supabase.storage.from(PHOTO_BUCKET).remove([photo.name]);
+      if (error) throw error;
+    } catch (err: any) {
+      setPhotos(previousPhotos);
+      alert('Delete failed: ' + err.message);
+    }
+  };
+
+  const updateSafetyMember = (name: Trekker, field: keyof SafetyMemberInfo, value: string) => {
+    setSafetyDraft((prev) => ({
+      ...prev,
+      trekkers: {
+        ...prev.trekkers,
+        [name]: { ...prev.trekkers[name], [field]: value },
+      },
+    }));
+  };
+
+  const updateBaseCamp = (field: keyof EmergencyData['baseCamp'], value: string) => {
+    setSafetyDraft((prev) => ({
+      ...prev,
+      baseCamp: { ...prev.baseCamp, [field]: value },
+    }));
+  };
+
+  const handleSaveSafety = async () => {
+    if (currentUser !== 'Treasurer') return;
+    setSavingSafety(true);
+    try {
+      const { error } = await supabase
+        .from('trip_state')
+        .update({ emergency_data: safetyDraft })
+        .eq('id', 1);
+      if (error) throw error;
+      setTripState((prev) => ({ ...prev, emergency_data: safetyDraft }));
+      setIsEditingSafety(false);
+    } catch (err: any) {
+      alert('Safety update failed: ' + err.message);
+    } finally {
+      setSavingSafety(false);
     }
   };
 
@@ -577,7 +708,7 @@ export default function TripTracker() {
         await supabase.from('expenses').insert(clean);
       }
       await supabase.from('trip_state')
-        .update({ treat_pot: parsed.tripState.treat_pot, group_status: parsed.tripState.group_status })
+        .update({ group_status: parsed.tripState.group_status })
         .eq('id', tripState.id);
       setRestoreSuccess(true);
       setTokenInput('');
@@ -630,12 +761,6 @@ export default function TripTracker() {
             {isOnline && pendingQueue.length === 0 ? <><Wifi size={13} /><span>Live</span></>
               : !isOnline ? <><WifiOff size={13} /><span>Offline {pendingQueue.length > 0 && `(${pendingQueue.length})`}</span></>
               : <><RefreshCw size={13} className="animate-spin" /><span>Syncing…</span></>}
-          </div>
-
-          {/* Viewing-as chip */}
-          <div className="flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200">
-            <span className="text-xs text-slate-500">As:</span>
-            <span className="text-sm font-bold text-slate-800">{currentUser}</span>
           </div>
 
           {/* Safety button */}
@@ -991,15 +1116,32 @@ export default function TripTracker() {
           </div>
         ) : (
           <div className="p-6 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            {photos.map((url, i) => (
-              <button
-                key={i}
-                onClick={() => openLightbox(url)}
-                className="group relative aspect-square rounded-xl overflow-hidden bg-slate-100 shadow-sm hover:shadow-md transition-all hover:scale-[1.03] active:scale-95"
-              >
-                <img src={url} alt={`Trek photo ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
-                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors rounded-xl" />
-              </button>
+            {photos.map((photo, i) => (
+              <div key={photo.name} className={`group relative aspect-square rounded-xl overflow-hidden bg-slate-100 shadow-sm hover:shadow-md transition-all hover:scale-[1.03] ${photo.isOptimistic ? 'opacity-70' : ''}`}>
+                <button
+                  type="button"
+                  onClick={() => openLightbox(photo.url)}
+                  className="absolute inset-0"
+                >
+                  <img src={photo.url} alt={`Trek photo ${i + 1}`} className="w-full h-full object-cover" loading="lazy" />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors rounded-xl" />
+                </button>
+                {photo.isOptimistic && (
+                  <div className="absolute left-2 top-2 rounded-full bg-white/90 px-2 py-1 text-[10px] font-bold text-violet-700 shadow-sm backdrop-blur">
+                    Syncing
+                  </div>
+                )}
+                {currentUser === 'Treasurer' && !photo.isOptimistic && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleDeletePhoto(photo); }}
+                    className="absolute right-2 top-2 rounded-full bg-white/90 p-2 text-rose-600 opacity-0 shadow-sm backdrop-blur transition-all hover:bg-rose-50 group-hover:opacity-100 active:scale-90"
+                    title="Delete photo"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -1116,7 +1258,7 @@ export default function TripTracker() {
       ════════════════════════════════════════════════════════════════════════ */}
       {activeTrekker && (
         <div className="fixed inset-0 z-40 flex items-center justify-end p-4 md:p-8"
-          style={{ background: 'rgba(15,23,42,0.45)', backdropFilter: 'blur(6px)' }}
+          style={{ background: 'rgba(15,23,42,0.45)', backdropFilter: 'blur(20px)' }}
           onClick={(e) => { if (e.target === e.currentTarget) closePersonalDashboard(); }}
         >
           <div
@@ -1138,8 +1280,9 @@ export default function TripTracker() {
             {/* Stats */}
             {(() => {
               const calc = individualCalculations.find((c) => c.name === activeTrekker)!;
-              const personalExp = getPersonalExpenses(activeTrekker, expenses);
+              const personalExp = getPersonalExpenses(activeTrekker);
               const perPersonBudget = DEFAULT_BUDGET / TREKKERS.length;
+              const remainingPersonalBudget = perPersonBudget - calc.share;
               const isOwed = calc.balance >= 0;
 
               // Category breakdown
@@ -1152,19 +1295,40 @@ export default function TripTracker() {
 
               return (
                 <div className="overflow-y-auto flex-1 p-5 space-y-5">
+                  <div className={`rounded-2xl border p-4 ${
+                    tripState.group_status === 'Emergency' ? 'bg-rose-50 border-rose-200'
+                    : tripState.group_status === 'Behind' ? 'bg-amber-50 border-amber-200'
+                    : tripState.group_status === 'Resting' ? 'bg-sky-50 border-sky-200'
+                    : 'bg-emerald-50 border-emerald-200'
+                  }`}>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Status Beacon</span>
+                    <p className={`mt-1 text-sm font-bold uppercase ${
+                      tripState.group_status === 'Emergency' ? 'text-rose-700'
+                      : tripState.group_status === 'Behind' ? 'text-amber-700'
+                      : tripState.group_status === 'Resting' ? 'text-sky-700'
+                      : 'text-emerald-700'
+                    }`}>
+                      Currently: {tripState.group_status}
+                    </p>
+                  </div>
+
                   {/* KPI row */}
                   <div className="grid grid-cols-3 gap-3">
                     <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
-                      <span className="text-[10px] text-slate-400 font-semibold uppercase block">Paid Out</span>
-                      <span className="text-lg font-bold text-slate-800">₹{calc.paid.toLocaleString()}</span>
-                    </div>
-                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
-                      <span className="text-[10px] text-slate-400 font-semibold uppercase block">My Share</span>
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase block">Total Spent</span>
                       <span className="text-lg font-bold text-slate-800">₹{Math.round(calc.share).toLocaleString()}</span>
                     </div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                      <span className="text-[10px] text-slate-400 font-semibold uppercase block">Remaining</span>
+                      <span className={`text-lg font-bold ${remainingPersonalBudget >= 0 ? 'text-slate-800' : 'text-rose-700'}`}>
+                        ₹{Math.round(remainingPersonalBudget).toLocaleString()}
+                      </span>
+                    </div>
                     <div className={`p-3 rounded-xl border text-center ${isOwed ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-                      <span className="text-[10px] font-semibold uppercase block text-slate-400">{isOwed ? 'Gets Back' : 'Owes'}</span>
-                      <span className={`text-lg font-bold ${isOwed ? 'text-emerald-700' : 'text-rose-700'}`}>₹{Math.abs(Math.round(calc.balance)).toLocaleString()}</span>
+                      <span className="text-[10px] font-semibold uppercase block text-slate-400">Balance Status</span>
+                      <span className={`text-lg font-bold ${isOwed ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {isOwed ? '+' : '-'}₹{Math.abs(Math.round(calc.balance)).toLocaleString()}
+                      </span>
                     </div>
                   </div>
 
@@ -1211,7 +1375,7 @@ export default function TripTracker() {
 
                   {/* Mini ledger */}
                   <div>
-                    <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">Transaction History ({personalExp.length})</h4>
+                    <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">Mini Ledger ({personalExp.length})</h4>
                     {personalExp.length === 0 ? (
                       <p className="text-xs text-slate-400 py-4 text-center">No transactions yet.</p>
                     ) : (
@@ -1268,9 +1432,22 @@ export default function TripTracker() {
                   <p className="text-xs text-rose-100">Hampta Pass Trek 2026 — Emergency Reference</p>
                 </div>
               </div>
-              <button onClick={closeSafetyPanel} className="p-2 rounded-xl hover:bg-rose-700 transition-all active:scale-90">
-                <X size={18} />
-              </button>
+              <div className="flex items-center gap-2">
+                {currentUser === 'Treasurer' && (
+                  <button
+                    onClick={() => {
+                      setSafetyDraft(tripState.emergency_data);
+                      setIsEditingSafety((prev) => !prev);
+                    }}
+                    className="rounded-xl bg-white/15 px-3 py-2 text-xs font-semibold text-white transition-all hover:bg-white/25 active:scale-95"
+                  >
+                    {isEditingSafety ? 'Cancel Edit' : 'Toggle Edit'}
+                  </button>
+                )}
+                <button onClick={closeSafetyPanel} className="p-2 rounded-xl hover:bg-rose-700 transition-all active:scale-90">
+                  <X size={18} />
+                </button>
+              </div>
             </div>
 
             <div className="overflow-y-auto flex-1 p-5 space-y-5">
@@ -1278,23 +1455,48 @@ export default function TripTracker() {
               <div className="p-4 bg-rose-50 border border-rose-100 rounded-2xl">
                 <div className="flex items-center gap-2 mb-3">
                   <MapPin className="text-rose-600 shrink-0" size={18} />
-                  <h3 className="font-bold text-slate-800">{BASE_CAMP.name}</h3>
+                  {isEditingSafety ? (
+                    <input
+                      value={safetyDraft.baseCamp.name}
+                      onChange={(e) => updateBaseCamp('name', e.target.value)}
+                      className="w-full rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-bold text-slate-800 outline-none focus:border-rose-400"
+                    />
+                  ) : (
+                    <h3 className="font-bold text-slate-800">{safetyData.baseCamp.name}</h3>
+                  )}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                  <div className="flex items-center gap-2 text-slate-600">
-                    <span className="font-semibold text-slate-500">📍 Coords:</span> {BASE_CAMP.coords}
-                  </div>
-                  <div className="flex items-center gap-2 text-slate-600">
-                    <span className="font-semibold text-slate-500">⛰️ Altitude:</span> {BASE_CAMP.altitude}
-                  </div>
-                  <div className="flex items-center gap-2 text-slate-600 sm:col-span-2">
-                    <Phone size={12} className="text-rose-500 shrink-0" />
-                    <span className="font-semibold text-rose-600">Mountain Rescue:</span> {BASE_CAMP.rescue.split(': ')[1]}
-                  </div>
-                  <div className="flex items-center gap-2 text-slate-600 sm:col-span-2">
-                    <Phone size={12} className="text-rose-500 shrink-0" />
-                    <span className="font-semibold text-rose-600">Nearest Hospital:</span> {BASE_CAMP.hospital.split(': ')[1]}
-                  </div>
+                  {isEditingSafety ? (
+                    <>
+                      {(['coords', 'altitude', 'rescue', 'hospital'] as const).map((field) => (
+                        <label key={field} className={field === 'rescue' || field === 'hospital' ? 'sm:col-span-2' : ''}>
+                          <span className="mb-1 block text-[10px] font-semibold uppercase text-rose-500">{field}</span>
+                          <input
+                            value={safetyDraft.baseCamp[field]}
+                            onChange={(e) => updateBaseCamp(field, e.target.value)}
+                            className="w-full rounded-xl border border-rose-200 bg-white px-3 py-2 text-slate-700 outline-none focus:border-rose-400"
+                          />
+                        </label>
+                      ))}
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 text-slate-600">
+                        <span className="font-semibold text-slate-500">📍 Coords:</span> {safetyData.baseCamp.coords}
+                      </div>
+                      <div className="flex items-center gap-2 text-slate-600">
+                        <span className="font-semibold text-slate-500">⛰️ Altitude:</span> {safetyData.baseCamp.altitude}
+                      </div>
+                      <div className="flex items-center gap-2 text-slate-600 sm:col-span-2">
+                        <Phone size={12} className="text-rose-500 shrink-0" />
+                        <span className="font-semibold text-rose-600">Mountain Rescue:</span> {safetyData.baseCamp.rescue}
+                      </div>
+                      <div className="flex items-center gap-2 text-slate-600 sm:col-span-2">
+                        <Phone size={12} className="text-rose-500 shrink-0" />
+                        <span className="font-semibold text-rose-600">Nearest Hospital:</span> {safetyData.baseCamp.hospital}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1303,29 +1505,66 @@ export default function TripTracker() {
                 <h3 className="text-xs font-semibold text-slate-500 uppercase mb-3">Team Emergency Info</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {TREKKERS.map((name) => {
-                    const info = EMERGENCY_INFO[name];
+                    const info = safetyData.trekkers[name];
                     return (
                       <div key={name} className="p-4 bg-slate-50 border border-slate-200 rounded-xl">
                         <div className="flex items-center justify-between mb-3">
                           <h4 className="font-bold text-slate-800">{name}</h4>
-                          <span className="flex items-center gap-1 bg-rose-100 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                            <Heart size={9} /> {info.blood}
-                          </span>
+                          {isEditingSafety ? (
+                            <input
+                              value={safetyDraft.trekkers[name].blood}
+                              onChange={(e) => updateSafetyMember(name, 'blood', e.target.value)}
+                              className="w-16 rounded-full border border-rose-200 bg-white px-2 py-1 text-center text-[10px] font-bold text-rose-700 outline-none focus:border-rose-400"
+                            />
+                          ) : (
+                            <span className="flex items-center gap-1 bg-rose-100 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                              <Heart size={9} /> {info.blood}
+                            </span>
+                          )}
                         </div>
                         <div className="space-y-1.5 text-xs text-slate-600">
-                          <div className="flex items-center gap-2">
-                            <Phone size={11} className="text-slate-400 shrink-0" />
-                            <span className="font-medium">{info.contact}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-slate-400 text-[10px] font-mono pl-0.5">{info.contactPhone}</span>
-                          </div>
+                          {isEditingSafety ? (
+                            <>
+                              <input
+                                value={safetyDraft.trekkers[name].contact}
+                                onChange={(e) => updateSafetyMember(name, 'contact', e.target.value)}
+                                placeholder="Emergency contact"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-700 outline-none focus:border-rose-300"
+                              />
+                              <input
+                                value={safetyDraft.trekkers[name].contactPhone}
+                                onChange={(e) => updateSafetyMember(name, 'contactPhone', e.target.value)}
+                                placeholder="Emergency number"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-slate-700 outline-none focus:border-rose-300"
+                              />
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-center gap-2">
+                                <Phone size={11} className="text-slate-400 shrink-0" />
+                                <span className="font-medium">{info.contact}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-slate-400 text-[10px] font-mono pl-0.5">{info.contactPhone}</span>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
+
+              {isEditingSafety && currentUser === 'Treasurer' && (
+                <button
+                  onClick={handleSaveSafety}
+                  disabled={savingSafety}
+                  className="w-full rounded-xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-rose-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {savingSafety ? 'Saving...' : 'Save Changes'}
+                </button>
+              )}
 
               {/* Altitude Warning */}
               <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
