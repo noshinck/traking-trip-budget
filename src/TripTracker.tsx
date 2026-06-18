@@ -1598,3 +1598,4 @@ export default function TripTracker() {
     </div>
   );
 }
+
