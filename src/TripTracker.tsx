@@ -206,7 +206,7 @@ export default function TripTracker() {
   const [isTopUpMode, setIsTopUpMode] = useState<boolean>(false);
 
   // Emergency buffer and leg allocations
-  const [emergencyBuffer, setEmergencyBuffer] = useState<number>(4000);
+  const [emergencyBuffer] = useState<number>(4000);
   const legAllocation = { manali: 0.7, delhi: 0.3 } as const; // 70/30 split by default
 
   const totalStandardSpend = expenses.filter((e) => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
