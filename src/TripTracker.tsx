@@ -196,6 +196,11 @@ export default function TripTracker() {
   // ── Derived
   const availableUsers = isTreasurerUnlocked ? [...TREKKERS, 'Treasurer' as const] : TREKKERS;
 
+  // Payment / expense UI state
+  const [paymentType, setPaymentType] = useState<'single' | 'multiple'>('single');
+  const [contributions, setContributions] = useState<Record<Trekker, number>>({ Noshin: 0, Nazih: 0, Nihad: 0, Jilshad: 0 });
+  const [paymentMethod, setPaymentMethod] = useState<'online' | 'cash'>('online');
+
   const totalStandardSpend = expenses.filter((e) => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   const totalFixedSpend    = expenses.filter((e) => e.type === 'Fixed-Package').reduce((s, e) => s + e.amount, 0);
   const totalGroupSpend    = totalStandardSpend + totalFixedSpend;
@@ -206,10 +211,22 @@ export default function TripTracker() {
   if (spendPercentage >= 90) trafficStatus = 'red';
   else if (spendPercentage >= 70) trafficStatus = 'yellow';
 
+  // Build per-trekker paid/share/balance using optional per-expense contributions
   const individualCalculations = TREKKERS.map((name) => {
+    // Paid: prefer explicit contributions map on expense; otherwise fall back to payer owning full amount
     const paid = expenses
-      .filter((e) => e.type === 'expense' && e.payer === name)
-      .reduce((s, e) => s + e.amount, 0);
+      .filter((e) => e.type === 'expense')
+      .reduce((s, e) => {
+        // If contributions field exists and has an entry for this name, use that contribution
+        if ((e as any).contributions && (e as any).contributions[name] != null) {
+          return s + Number((e as any).contributions[name] || 0);
+        }
+        // Fallback: if payer matches name, they paid the full amount
+        if (e.payer === name) return s + e.amount;
+        return s;
+      }, 0);
+
+    // Share: calculate how much of each expense this person is responsible for
     let share = 0;
     expenses.forEach((e) => {
       if (e.type === 'expense') {
@@ -217,6 +234,7 @@ export default function TripTracker() {
         if (splits.includes(name)) share += e.amount / splits.length;
       }
     });
+
     return { name, paid, share, balance: paid - share };
   });
 
@@ -553,7 +571,7 @@ export default function TripTracker() {
     if (expenseType !== 'Fixed-Package' && splitBetween.length === 0) { alert('Please select at least one person to split with'); return; }
 
     const catObj = CATEGORIES.find((c) => c.id === selectedCategory);
-    const newExpense = {
+    const newExpense: any = {
       id: Math.random().toString(36).substring(7),
       amount: parseFloat(amount),
       description: description.trim(),
@@ -561,17 +579,32 @@ export default function TripTracker() {
       payer,
       split_between: expenseType === 'Fixed-Package' ? [] : splitBetween,
       type: expenseType,
+      payment_type: paymentType,
+      payment_method: paymentMethod,
       timestamp: new Date().toISOString(),
     };
+
+    if (paymentType === 'multiple') {
+      newExpense.contributions = { ...contributions };
+      const sum = Object.values(newExpense.contributions).reduce((s: number, v: any) => s + Number(v || 0), 0);
+      const sumNum = Number(sum || 0);
+      const amtNum = Number(newExpense.amount || 0);
+      if (Math.round(sumNum) !== Math.round(amtNum)) {
+        if (!confirm(`Contributions total ₹${sumNum} does not equal amount ₹${amtNum}. Proceed?`)) return;
+      }
+    }
 
     if (!isOnline) { addToQueue('insert_expense', newExpense); setAmount(''); setDescription(''); return; }
 
     setSyncing(true);
     try {
-      const { id, ...dbPayload } = newExpense;
-      const { error } = await supabase.from('expenses').insert([dbPayload]);
+  const { id, ...dbPayload } = newExpense;
+  const { error } = await supabase.from('expenses').insert([dbPayload]);
       if (error) throw error;
-      setAmount(''); setDescription('');
+  setAmount(''); setDescription('');
+  // Reset payment UI
+  setContributions({ Noshin: 0, Nazih: 0, Nihad: 0, Jilshad: 0 });
+  setPaymentType('single'); setPaymentMethod('online'); setPayer('Noshin');
     } catch (err) {
       addToQueue('insert_expense', newExpense);
       setAmount(''); setDescription('');
@@ -931,15 +964,16 @@ export default function TripTracker() {
           </div>
         </div>
 
-        {/* MIDDLE: Expense Logger */}
-        <div className="space-y-6 md:col-span-1">
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-150">
-            <div className="flex items-center gap-2 mb-4">
-              <TrendingUp className="text-indigo-600" size={20} />
-              <h3 className="font-semibold text-slate-800">Log Expense</h3>
-            </div>
+        {/* MIDDLE: Expense Logger (Treasurer only) */}
+        {currentUser === 'Treasurer' && (
+          <div className="space-y-6 md:col-span-1">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-150">
+              <div className="flex items-center gap-2 mb-4">
+                <TrendingUp className="text-indigo-600" size={20} />
+                <h3 className="font-semibold text-slate-800">Log Expense</h3>
+              </div>
 
-            <form onSubmit={handleAddExpense} className="space-y-4">
+              <form onSubmit={handleAddExpense} className="space-y-4">
               {/* Category Grid */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-2">Category</label>
@@ -994,6 +1028,51 @@ export default function TripTracker() {
                 </select>
               </div>
 
+              {/* Payment Type: Single / Multiple */}
+              <div className="pt-2">
+                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Payment Type</label>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => setPaymentType('single')}
+                    className={`px-3 py-1 rounded-full text-sm font-semibold ${paymentType === 'single' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>
+                    Single Payer
+                  </button>
+                  <button type="button" onClick={() => setPaymentType('multiple')}
+                    className={`px-3 py-1 rounded-full text-sm font-semibold ${paymentType === 'multiple' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>
+                    Multiple Payers
+                  </button>
+                </div>
+              </div>
+
+              {/* Payment Method */}
+              <div className="pt-2">
+                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Payment Method</label>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => setPaymentMethod('online')} className={`px-3 py-1 rounded-full text-sm font-semibold ${paymentMethod === 'online' ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>
+                    Online Pay 💳
+                  </button>
+                  <button type="button" onClick={() => setPaymentMethod('cash')} className={`px-3 py-1 rounded-full text-sm font-semibold ${paymentMethod === 'cash' ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>
+                    Cash 💵
+                  </button>
+                </div>
+              </div>
+
+              {/* Multiple Payers: contributions inputs */}
+              {paymentType === 'multiple' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase mb-2">Contributions</label>
+                  <div className="grid grid-cols-1 gap-2">
+                    {TREKKERS.map((t) => (
+                      <div key={t} className="flex items-center gap-2">
+                        <span className="text-sm w-20">{t}</span>
+                        <input type="number" step="1" min="0" value={contributions[t]}
+                          onChange={(e) => setContributions((prev) => ({ ...prev, [t]: Number(e.target.value || 0) }))}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-1 focus:ring-slate-300" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Split Between */}
               {expenseType !== 'Fixed-Package' ? (
                 <div>
@@ -1024,13 +1103,14 @@ export default function TripTracker() {
                 </div>
               )}
 
-              <button type="submit" disabled={syncing}
-                className="w-full bg-slate-900 text-white font-semibold py-3 px-4 rounded-xl text-sm hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-sm">
-                <Plus size={16} /> Log Transaction
-              </button>
-            </form>
+                <button type="submit" disabled={syncing}
+                  className="w-full bg-slate-900 text-white font-semibold py-3 px-4 rounded-xl text-sm hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-sm">
+                  <Plus size={16} /> Log Transaction
+                </button>
+              </form>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* RIGHT: Trekker Balances + WhatsApp */}
         <div className="space-y-6 md:col-span-1">
