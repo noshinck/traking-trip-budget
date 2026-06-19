@@ -525,22 +525,58 @@ export default function TripTracker() {
     try {
       for (const item of queue) {
         if (item.action === 'insert_expense') {
-          const { id, ...payload } = item.payload;
-          const { error } = await supabase.from('expenses').insert([payload]);
-          if (error) throw error;
+          const { id: tempId, ...payload } = item.payload;
+          // Ensure any contributions are passed as multi_payers as well (some schemas use that column)
+          const insertPayload = { ...payload, multi_payers: (payload as any).contributions ?? null };
+          try {
+            const { data: inserted, error } = await supabase.from('expenses').insert([insertPayload]).select();
+            if (error) {
+              // log full supabase error for debugging
+              console.error('Supabase insert error (flushQueue):', error.message, error.details || error.hint || error.code || error);
+              // remove optimistic entry from UI to avoid ghost transactions while keeping queue item for retry
+              setExpenses((prev) => prev.filter((e) => e.id !== tempId));
+              continue; // leave this item in remaining (do not shift)
+            }
+            // success: remove optimistic entry (temp) and add server record if returned
+            setExpenses((prev) => prev.filter((e) => e.id !== tempId));
+            if (inserted && Array.isArray(inserted) && inserted.length > 0) {
+              // insert server-returned record at top
+              setExpenses((prev) => [inserted[0] as Expense, ...prev]);
+            }
+          } catch (err: any) {
+            console.error('Unexpected error during flush insert:', err?.message ?? err, err?.details ?? 'no details');
+            setExpenses((prev) => prev.filter((e) => e.id !== tempId));
+            continue;
+          }
         } else if (item.action === 'delete_expense') {
           const { error } = await supabase.from('expenses').delete().eq('id', item.payload.id);
-          if (error) throw error;
+          if (error) {
+            console.error('Supabase delete error (flushQueue):', error.message, error.details || error.hint || error.code || error);
+            continue; // keep it in remaining
+          }
         } else if (item.action === 'update_status') {
           const { error } = await supabase.from('trip_state').update({ group_status: item.payload.group_status }).eq('id', tripState.id);
-          if (error) throw error;
+          if (error) {
+            console.error('Supabase update_status error (flushQueue):', error.message, error.details || error.hint || error.code || error);
+            continue;
+          }
         }
+        // processed successfully -> drop from remaining
         remaining.shift();
       }
-      localStorage.removeItem('pending_sync_queue');
-      setPendingQueue([]);
+
+      if (remaining.length === 0) {
+        localStorage.removeItem('pending_sync_queue');
+        setPendingQueue([]);
+      } else {
+        localStorage.setItem('pending_sync_queue', JSON.stringify(remaining));
+        setPendingQueue(remaining);
+      }
+
+      // Refresh from server so records are normalized
       fetchData();
     } catch (err: any) {
+      console.error('flushQueue unexpected error:', err?.message ?? err, err?.details ?? 'no details');
       localStorage.setItem('pending_sync_queue', JSON.stringify(remaining));
       setPendingQueue(remaining);
     } finally {
@@ -626,18 +662,38 @@ export default function TripTracker() {
       }
     }
 
-    if (!isOnline) { addToQueue('insert_expense', newExpense); setAmount(''); setDescription(''); return; }
+    // prepare payload for DB: remove local temp id and attach multi_payers for schema compatibility
+    const payloadForDb = { ...newExpense };
+    delete payloadForDb.id;
+    payloadForDb.multi_payers = newExpense.contributions ?? null;
+
+    if (!isOnline) {
+      // show optimistic UI and queue for sync
+      addToQueue('insert_expense', newExpense);
+      setAmount(''); setDescription('');
+      return;
+    }
 
     setSyncing(true);
     try {
-  const { id, ...dbPayload } = newExpense;
-  const { error } = await supabase.from('expenses').insert([dbPayload]);
-      if (error) throw error;
-  setAmount(''); setDescription('');
-  // Reset payment UI
-  setContributions({ Noshin: 0, Nazih: 0, Nihad: 0, Jilshad: 0 });
-  setPaymentType('single'); setPaymentMethod('online'); setPayer('Noshin');
-    } catch (err) {
+      const { data, error } = await supabase.from('expenses').insert([payloadForDb]).select();
+      if (error) {
+        console.error('Supabase insert error (handleAddExpense):', error.message, error.details || error.hint || error.code || error);
+        // Add to queue and show optimistic UI
+        addToQueue('insert_expense', newExpense);
+      } else {
+        // success -> ensure optimistic items (if any) not present, and use server record
+        setExpenses((prev) => prev.filter((e) => e.id !== newExpense.id));
+        if (data && Array.isArray(data) && data.length > 0) {
+          setExpenses((prev) => [data[0] as Expense, ...prev]);
+        }
+      }
+      setAmount(''); setDescription('');
+      // Reset payment UI
+      setContributions({ Noshin: 0, Nazih: 0, Nihad: 0, Jilshad: 0 });
+      setPaymentType('single'); setPaymentMethod('online'); setPayer('Noshin');
+    } catch (err: any) {
+      console.error('Unexpected error in handleAddExpense:', err?.message ?? err, err?.details ?? 'no details');
       addToQueue('insert_expense', newExpense);
       setAmount(''); setDescription('');
     } finally {
@@ -663,14 +719,25 @@ export default function TripTracker() {
       type: 'TOP_UP',
       timestamp: new Date().toISOString(),
     };
+    const payloadForDb = { ...newTopUp };
+    delete payloadForDb.id;
+    payloadForDb.multi_payers = null;
+
     if (!isOnline) { addToQueue('insert_expense', newTopUp); setTopUpAmount(''); return; }
     setSyncing(true);
     try {
-      const { id, ...dbPayload } = newTopUp;
-      const { error } = await supabase.from('expenses').insert([dbPayload]);
-      if (error) throw error;
+      const { data, error } = await supabase.from('expenses').insert([payloadForDb]).select();
+      if (error) {
+        console.error('Supabase insert error (handleAddTopUp):', error.message, error.details || error.hint || error.code || error);
+        addToQueue('insert_expense', newTopUp);
+      } else {
+        // on success, ensure we don't keep optimistic top-up entries
+        setExpenses((prev) => prev.filter((e) => e.id !== newTopUp.id));
+        if (data && Array.isArray(data) && data.length > 0) setExpenses((prev) => [data[0] as Expense, ...prev]);
+      }
       setTopUpAmount(''); setIsTopUpMode(false);
     } catch (err: any) {
+      console.error('Unexpected error in handleAddTopUp:', err?.message ?? err, err?.details ?? 'no details');
       addToQueue('insert_expense', newTopUp);
       setTopUpAmount(''); setIsTopUpMode(false);
     } finally { setSyncing(false); }
@@ -1225,7 +1292,25 @@ export default function TripTracker() {
             </div>
             <p className="text-xs text-slate-400 mb-4">Tap a name to see their personal dashboard.</p>
 
-            {/* Spender Leaderboard (sorted by paid desc) */}
+            {/* Top summary: Total Spent / Remaining / Balance Status */}
+            <div className="mb-3 grid grid-cols-3 gap-2">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Total Spent</span>
+                <span className="text-lg font-bold text-slate-800">₹{totalGroupSpend.toLocaleString()}</span>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                <span className="text-[10px] text-slate-400 font-semibold uppercase block">Remaining</span>
+                <span className="text-lg font-bold text-slate-800">₹{remainingBudget.toLocaleString()}</span>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                <span className="text-[10px] font-semibold uppercase block text-slate-400">Balance Status</span>
+                <span className={`text-lg font-bold ${individualCalculations.reduce((s,c) => s + c.balance, 0) >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {individualCalculations.reduce((s,c) => s + c.balance, 0) >= 0 ? '+' : '-'}₹{Math.abs(Math.round(individualCalculations.reduce((s,c) => s + c.balance, 0))).toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            {/* Spender Leaderboard (sorted by paid desc) - show personal remaining (ceiling - share) */}
             <div className="mb-3">
               <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">Spender Leaderboard</h4>
               <div className="grid grid-cols-1 gap-2">
@@ -1236,7 +1321,7 @@ export default function TripTracker() {
                       <span className="font-medium">{u.name}</span>
                       <span className="text-[11px] text-slate-400">₹{u.paid.toLocaleString()}</span>
                     </div>
-                    <div className="text-xs text-slate-500">Bal: ₹{Math.round(u.balance).toLocaleString()}</div>
+                    <div className="text-xs text-slate-500">Rem: ₹{Math.round(((personalCeiling as any)[u.name] || 15000) - u.share).toLocaleString()}</div>
                   </div>
                 ))}
               </div>
