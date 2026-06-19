@@ -200,6 +200,12 @@ export default function TripTracker() {
   const [paymentType, setPaymentType] = useState<'single' | 'multiple'>('single');
   const [contributions, setContributions] = useState<Record<Trekker, number>>({ Noshin: 0, Nazih: 0, Nihad: 0, Jilshad: 0 });
   const [paymentMethod, setPaymentMethod] = useState<'online' | 'cash'>('online');
+  // Treasurer mode toggle (must be true + role === 'Treasurer' to show logger)
+  const [isTreasurerMode, setIsTreasurerMode] = useState<boolean>(false);
+
+  // Emergency buffer and leg allocations
+  const [emergencyBuffer, setEmergencyBuffer] = useState<number>(4000);
+  const legAllocation = { manali: 0.7, delhi: 0.3 } as const; // 70/30 split by default
 
   const totalStandardSpend = expenses.filter((e) => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   const totalFixedSpend    = expenses.filter((e) => e.type === 'Fixed-Package').reduce((s, e) => s + e.amount, 0);
@@ -237,6 +243,12 @@ export default function TripTracker() {
 
     return { name, paid, share, balance: paid - share };
   });
+
+  // Leg spends and percentages
+  const manaliSpend = expenses.filter(e => ['Transport', 'Stay', 'Other'].includes(e.category)).reduce((s,e) => s + e.amount, 0);
+  const delhiSpend  = expenses.filter(e => ['Food', 'Gear', 'Other'].includes(e.category)).reduce((s,e) => s + e.amount, 0);
+  const manaliPct = Math.min(100, Math.round((manaliSpend / (DEFAULT_BUDGET * legAllocation.manali || 1)) * 100));
+  const delhiPct  = Math.min(100, Math.round((delhiSpend  / (DEFAULT_BUDGET * legAllocation.delhi  || 1)) * 100));
 
   const getPersonalExpenses = useCallback((trekkerName: string): Expense[] =>
     expenses.filter((e) => {
@@ -822,6 +834,15 @@ export default function TripTracker() {
             </button>
           )}
 
+          {/* Treasurer Mode Toggle (only meaningful when role is Treasurer) */}
+          {currentUser === 'Treasurer' && (
+            <button
+              onClick={() => setIsTreasurerMode((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${isTreasurerMode ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>
+              <ShieldCheck size={12} /> {isTreasurerMode ? 'Treasurer Mode' : 'View Mode'}
+            </button>
+          )}
+
           {/* Force sync */}
           <button
             onClick={flushQueue}
@@ -965,7 +986,7 @@ export default function TripTracker() {
         </div>
 
         {/* MIDDLE: Expense Logger (Treasurer only) */}
-        {currentUser === 'Treasurer' && (
+  {currentUser === 'Treasurer' && isTreasurerMode && (
           <div className="space-y-6 md:col-span-1">
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-150">
               <div className="flex items-center gap-2 mb-4">
@@ -1126,6 +1147,23 @@ export default function TripTracker() {
             </div>
             <p className="text-xs text-slate-400 mb-4">Tap a name to see their personal dashboard.</p>
 
+            {/* Spender Leaderboard (sorted by paid desc) */}
+            <div className="mb-3">
+              <h4 className="text-xs font-semibold text-slate-500 uppercase mb-2">Spender Leaderboard</h4>
+              <div className="grid grid-cols-1 gap-2">
+                {([...individualCalculations].sort((a,b) => b.paid - a.paid)).map((u, idx) => (
+                  <div key={u.name} className="flex items-center justify-between p-2 rounded-lg bg-slate-50 border border-slate-100 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs">{idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '💤'}</span>
+                      <span className="font-medium">{u.name}</span>
+                      <span className="text-[11px] text-slate-400">₹{u.paid.toLocaleString()}</span>
+                    </div>
+                    <div className="text-xs text-slate-500">Bal: ₹{Math.round(u.balance).toLocaleString()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <div className="space-y-3">
               {individualCalculations.map((u) => {
                 const isOwed = u.balance >= 0;
@@ -1152,9 +1190,40 @@ export default function TripTracker() {
               })}
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between items-center">
-              <span className="text-[10px] text-slate-400 uppercase font-medium">Standard Group Spend</span>
-              <span className="text-sm font-bold text-slate-700">₹{totalStandardSpend.toLocaleString()}</span>
+            {/* BROKE ALERT: Paid < 40% of Share */}
+            {individualCalculations.some((i) => i.paid < 0.4 * i.share) && (
+              <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-100 text-amber-800 text-sm">
+                {individualCalculations.filter((i) => i.paid < 0.4 * i.share).map((i) => (
+                  <div key={i.name}>⚠️ <strong>{i.name}</strong>'s contributions are very low. Consider letting them handle the next payment to balance the scales.</div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 pt-3 border-t border-slate-100">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-[10px] text-slate-400 uppercase font-medium">Standard Group Spend</span>
+                <span className="text-sm font-bold text-slate-700">₹{totalStandardSpend.toLocaleString()}</span>
+              </div>
+
+              {/* Emergency buffer display */}
+              <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-slate-50 border border-slate-100 flex items-center justify-center">🔒</div>
+                  <div>
+                    <div className="text-[11px]">Emergency Buffer</div>
+                    <div className="font-bold">₹{emergencyBuffer.toLocaleString()}</div>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400">Locked from total budget</div>
+              </div>
+
+              {/* Dual-leg pacing meters */}
+              <div className="mt-4 space-y-2">
+                <div className="text-xs text-slate-500 flex justify-between"><span>Manali Trek Leg</span><span>₹{Math.round((totalStandardSpend * legAllocation.manali)).toLocaleString()}</span></div>
+                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div className="h-2 bg-emerald-500" style={{ width: `${manaliPct}%` }} /></div>
+                <div className="text-xs text-slate-500 flex justify-between"><span>Delhi City Leg</span><span>₹{Math.round((totalStandardSpend * legAllocation.delhi)).toLocaleString()}</span></div>
+                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div className="h-2 bg-indigo-500" style={{ width: `${delhiPct}%` }} /></div>
+              </div>
             </div>
           </div>
 
