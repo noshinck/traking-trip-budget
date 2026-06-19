@@ -57,7 +57,7 @@ interface Expense {
   category: string;
   payer: string;
   split_between: string | string[];
-  type: 'expense' | 'Fixed-Package';
+  type: 'expense' | 'Fixed-Package' | 'TOP_UP';
   timestamp: string;
 }
 
@@ -202,6 +202,8 @@ export default function TripTracker() {
   const [paymentMethod, setPaymentMethod] = useState<'online' | 'cash'>('online');
   // Treasurer mode toggle (must be true + role === 'Treasurer' to show logger)
   const [isTreasurerMode, setIsTreasurerMode] = useState<boolean>(false);
+  // Top-up mode for Treasurer logger
+  const [isTopUpMode, setIsTopUpMode] = useState<boolean>(false);
 
   // Emergency buffer and leg allocations
   const [emergencyBuffer, setEmergencyBuffer] = useState<number>(4000);
@@ -221,7 +223,8 @@ export default function TripTracker() {
   const individualCalculations = TREKKERS.map((name) => {
     // Paid: prefer explicit contributions map on expense; otherwise fall back to payer owning full amount
     const paid = expenses
-      .filter((e) => e.type === 'expense')
+      // include TOP_UP and expense in paid calculations
+      .filter((e) => e.type === 'expense' || e.type === 'TOP_UP')
       .reduce((s, e) => {
         // If contributions field exists and has an entry for this name, use that contribution
         if ((e as any).contributions && (e as any).contributions[name] != null) {
@@ -232,7 +235,7 @@ export default function TripTracker() {
         return s;
       }, 0);
 
-    // Share: calculate how much of each expense this person is responsible for
+    // Share: calculate how much of each expense this person is responsible for (exclude TOP_UP)
     let share = 0;
     expenses.forEach((e) => {
       if (e.type === 'expense') {
@@ -243,6 +246,23 @@ export default function TripTracker() {
 
     return { name, paid, share, balance: paid - share };
   });
+
+  // Calculate top-up totals per trekker and personal ceilings
+  const topUpTotals: Record<Trekker, number> = TREKKERS.reduce((acc, t) => ({ ...acc, [t]: 0 }), {} as Record<Trekker, number>);
+  expenses.forEach((e) => {
+    if (e.type === 'TOP_UP') {
+      // if contributions map exists, use it, otherwise attribute to payer
+      if ((e as any).contributions) {
+        Object.entries((e as any).contributions).forEach(([k, v]) => {
+          if (TREKKERS.includes(k as Trekker)) topUpTotals[k as Trekker] = (topUpTotals[k as Trekker] || 0) + Number(v || 0);
+        });
+      } else if (TREKKERS.includes(e.payer as Trekker)) {
+        topUpTotals[e.payer as Trekker] = (topUpTotals[e.payer as Trekker] || 0) + Number(e.amount || 0);
+      }
+    }
+  });
+
+  const personalCeiling = TREKKERS.reduce((acc, t) => ({ ...acc, [t]: 15000 + (topUpTotals[t] || 0) }), {} as Record<Trekker, number>);
 
   // Leg spends and percentages
   const manaliSpend = expenses.filter(e => ['Transport', 'Stay', 'Other'].includes(e.category)).reduce((s,e) => s + e.amount, 0);
@@ -625,6 +645,37 @@ export default function TripTracker() {
     }
   };
 
+  // Handle personal top-ups (stored as type: 'TOP_UP')
+  const [topUpTrekker, setTopUpTrekker] = useState<Trekker>('Noshin');
+  const [topUpAmount, setTopUpAmount] = useState('');
+
+  const handleAddTopUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amt = Number(topUpAmount);
+    if (!amt || amt <= 0) { alert('Enter a valid top-up amount'); return; }
+    const newTopUp: any = {
+      id: Math.random().toString(36).substring(7),
+      amount: amt,
+      description: 'Personal Top-Up',
+      category: 'Other',
+      payer: topUpTrekker,
+      split_between: [],
+      type: 'TOP_UP',
+      timestamp: new Date().toISOString(),
+    };
+    if (!isOnline) { addToQueue('insert_expense', newTopUp); setTopUpAmount(''); return; }
+    setSyncing(true);
+    try {
+      const { id, ...dbPayload } = newTopUp;
+      const { error } = await supabase.from('expenses').insert([dbPayload]);
+      if (error) throw error;
+      setTopUpAmount(''); setIsTopUpMode(false);
+    } catch (err: any) {
+      addToQueue('insert_expense', newTopUp);
+      setTopUpAmount(''); setIsTopUpMode(false);
+    } finally { setSyncing(false); }
+  };
+
   // ── Delete expense
   const handleDeleteExpense = async (id: string | number) => {
     if (!confirm('Delete this expense?')) return;
@@ -994,7 +1045,14 @@ export default function TripTracker() {
                 <h3 className="font-semibold text-slate-800">Log Expense</h3>
               </div>
 
-              <form onSubmit={handleAddExpense} className="space-y-4">
+              {/* Tabs: Expense vs Top-Up */}
+              <div className="flex items-center gap-2 mb-4">
+                <button type="button" onClick={() => setIsTopUpMode(false)} className={`px-3 py-1 rounded-full text-sm font-semibold ${!isTopUpMode ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>Log Expense</button>
+                <button type="button" onClick={() => setIsTopUpMode(true)} className={`px-3 py-1 rounded-full text-sm font-semibold ${isTopUpMode ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>Add Personal Top-Up</button>
+              </div>
+
+              {!isTopUpMode ? (
+                <form onSubmit={handleAddExpense} className="space-y-4">
               {/* Category Grid */}
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-2">Category</label>
@@ -1124,11 +1182,31 @@ export default function TripTracker() {
                 </div>
               )}
 
-                <button type="submit" disabled={syncing}
-                  className="w-full bg-slate-900 text-white font-semibold py-3 px-4 rounded-xl text-sm hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-sm">
-                  <Plus size={16} /> Log Transaction
-                </button>
-              </form>
+                    <button type="submit" disabled={syncing}
+                      className="w-full bg-slate-900 text-white font-semibold py-3 px-4 rounded-xl text-sm hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-sm">
+                      <Plus size={16} /> Log Transaction
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleAddTopUp} className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Trekker</label>
+                      <select value={topUpTrekker} onChange={(e) => setTopUpTrekker(e.target.value as Trekker)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-slate-800 focus:outline-none focus:ring-1 focus:ring-slate-300 text-sm cursor-pointer">
+                        {TREKKERS.map(t => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Top-Up Amount (₹)</label>
+                      <input type="number" required placeholder="2000" value={topUpAmount} onChange={(e) => setTopUpAmount(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-300 text-sm" />
+                    </div>
+                    <button type="submit" disabled={syncing}
+                      className="w-full bg-slate-900 text-white font-semibold py-3 px-4 rounded-xl text-sm hover:bg-slate-800 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-sm">
+                      Log Top-Up
+                    </button>
+                  </form>
+                )}
             </div>
           </div>
         )}
@@ -1191,9 +1269,15 @@ export default function TripTracker() {
             </div>
 
             {/* BROKE ALERT: Paid < 40% of Share */}
-            {individualCalculations.some((i) => i.paid < 0.4 * i.share) && (
+            {individualCalculations.some((i) => {
+              const ceiling = (personalCeiling as any)[i.name] || 15000;
+              return i.share > ceiling && i.paid < 0.4 * i.share;
+            }) && (
               <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-100 text-amber-800 text-sm">
-                {individualCalculations.filter((i) => i.paid < 0.4 * i.share).map((i) => (
+                {individualCalculations.filter((i) => {
+                  const ceiling = (personalCeiling as any)[i.name] || 15000;
+                  return i.share > ceiling && i.paid < 0.4 * i.share;
+                }).map((i) => (
                   <div key={i.name}>⚠️ <strong>{i.name}</strong>'s contributions are very low. Consider letting them handle the next payment to balance the scales.</div>
                 ))}
               </div>
@@ -1430,8 +1514,8 @@ export default function TripTracker() {
             {(() => {
               const calc = individualCalculations.find((c) => c.name === activeTrekker)!;
               const personalExp = getPersonalExpenses(activeTrekker);
-              const perPersonBudget = DEFAULT_BUDGET / TREKKERS.length;
-              const remainingPersonalBudget = perPersonBudget - calc.share;
+              const ceiling = (personalCeiling as any)[activeTrekker] || 15000;
+              const remainingPersonalBudget = ceiling - calc.share;
               const isOwed = calc.balance >= 0;
 
               // Category breakdown
@@ -1484,16 +1568,16 @@ export default function TripTracker() {
                   {/* Spend vs Budget bar */}
                   <div>
                     <div className="flex justify-between text-xs font-semibold text-slate-400 uppercase mb-1">
-                      <span>Personal Budget Used</span>
-                      <span>{((calc.share / perPersonBudget) * 100).toFixed(1)}%</span>
+                      <span>Personal Budget Used (Ceiling)</span>
+                      <span>{((calc.share / ceiling) * 100).toFixed(1)}%</span>
                     </div>
                     <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
                       <div
                         className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, (calc.share / perPersonBudget) * 100)}%` }}
+                        style={{ width: `${Math.min(100, (calc.share / ceiling) * 100)}%` }}
                       />
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-1">Budget per person: ₹{perPersonBudget.toLocaleString()}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">Ceiling: ₹15,000 Base + ₹{((ceiling - 15000) || 0).toLocaleString()} Extra</p>
                   </div>
 
                   {/* Category breakdown */}
